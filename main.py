@@ -366,7 +366,7 @@ async def answer():
     cleanup_old_logs()
 
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True, force=True)
         if not data:
             logger.warning("Missing JSON data")
             return jsonify({"error": "No JSON data"}), 400
