@@ -91,13 +91,11 @@ except json.JSONDecodeError:
         f"API_EXTRA_HEADERS is not valid JSON: {extra_headers_str}"
     )
 
-# ── PostgreSQL 缓存配置 ──────────────────────────────────
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/ai_tiku_cache",
-)
+# ── PostgreSQL 缓存配置（可选，不设置则跳过缓存）───────────
+DATABASE_URL = os.getenv("DATABASE_URL")
 DB_CACHE_TTL_SECONDS = int(os.getenv("DB_CACHE_TTL_SECONDS", str(24 * 3600)))
 db_pool: Optional[asyncpg.Pool] = None
+DB_ENABLED = bool(DATABASE_URL)
 
 # ── 日志配置 ──────────────────────────────────────────────
 LOG_FILE = "requests.log"
@@ -191,58 +189,66 @@ def make_cache_key(question: str, options: str, model: str) -> str:
     )
 
 
-@retry(
-    retry=retry_if_exception(
-        lambda e: isinstance(e, (OSError, asyncpg.PostgresError, ConnectionError))
-    ),
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=1, max=16),
-    reraise=True,
-)
-async def init_db_pool() -> asyncpg.Pool:
+async def init_db_pool() -> Optional[asyncpg.Pool]:
+    if not DB_ENABLED:
+        return None
+
     global db_pool
     if db_pool is not None:
         return db_pool
 
-    db_pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=5,
-        timeout=10.0,
-    )
-
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS api_cache (
-                cache_key TEXT PRIMARY KEY,
-                question TEXT NOT NULL,
-                options TEXT,
-                model TEXT NOT NULL,
-                answer TEXT NOT NULL,
-                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-            )
-            """
+    try:
+        db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            timeout=10.0,
         )
 
-    return db_pool
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS api_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    question TEXT NOT NULL,
+                    options TEXT,
+                    model TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+        return db_pool
+    except Exception as e:
+        logger.warning(
+            "Failed to connect to PostgreSQL (%s) — caching disabled for this session", e
+        )
+        return None
 
 
 async def get_cached_answer(cache_key: str) -> Optional[str]:
     pool = await init_db_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT answer, updated_at FROM api_cache WHERE cache_key = $1",
-            cache_key,
-        )
-
-    if not row:
+    if pool is None:
         return None
 
-    if time.time() - row["updated_at"].timestamp() > DB_CACHE_TTL_SECONDS:
-        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT answer, updated_at FROM api_cache WHERE cache_key = $1",
+                cache_key,
+            )
 
-    return row["answer"]
+        if not row:
+            return None
+
+        if time.time() - row["updated_at"].timestamp() > DB_CACHE_TTL_SECONDS:
+            return None
+
+        return row["answer"]
+    except Exception as e:
+        logger.warning("Cache lookup failed (%s) — skipping cache", e)
+        return None
 
 
 async def upsert_cached_answer(
@@ -253,21 +259,27 @@ async def upsert_cached_answer(
     answer: str,
 ) -> None:
     pool = await init_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO api_cache (cache_key, question, options, model, answer, updated_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
-            ON CONFLICT (cache_key) DO UPDATE
-            SET answer = EXCLUDED.answer,
-                updated_at = EXCLUDED.updated_at
-            """,
-            cache_key,
-            question,
-            options,
-            model,
-            answer,
-        )
+    if pool is None:
+        return
+
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO api_cache (cache_key, question, options, model, answer, updated_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (cache_key) DO UPDATE
+                SET answer = EXCLUDED.answer,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                cache_key,
+                question,
+                options,
+                model,
+                answer,
+            )
+    except Exception as e:
+        logger.warning("Cache write failed (%s) — skipping cache", e)
 
 
 def should_retry(exception: Exception) -> bool:
@@ -372,19 +384,7 @@ async def answer():
             model = PROVIDER_DEFAULT_MODEL
 
         cache_key = make_cache_key(question, options, model)
-        try:
-            cached_answer = await get_cached_answer(cache_key)
-        except Exception as e:
-            elapsed = time.perf_counter() - start_time
-            logger.exception(
-                "db_lookup_error model=%s question=%r options=%r error=%s elapsed=%.3fs",
-                model,
-                question,
-                options,
-                str(e),
-                elapsed,
-            )
-            return jsonify({"error": "Database lookup failed"}), 500
+        cached_answer = await get_cached_answer(cache_key)
 
         if cached_answer:
             elapsed = time.perf_counter() - start_time
@@ -461,18 +461,7 @@ async def answer():
             )
             return jsonify([]), 200
 
-        try:
-            await upsert_cached_answer(cache_key, question, options, model, answer_text)
-        except Exception as e:
-            logger.exception(
-                "db_write_error model=%s question=%r options=%r error=%s elapsed=%.3fs",
-                model,
-                question,
-                options,
-                str(e),
-                elapsed,
-            )
-            return jsonify({"error": "Database write failed"}), 500
+        await upsert_cached_answer(cache_key, question, options, model, answer_text)
 
         logger.info(
             "answered model=%s question=%r options=%r answer=%r elapsed=%.3fs",
