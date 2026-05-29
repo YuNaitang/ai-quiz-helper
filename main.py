@@ -23,25 +23,25 @@ CORS(app)  # 允许跨域，让 OCS 脚本能访问
 # ── API 服务商预设 ──────────────────────────────────────────
 PROVIDER_PRESETS = {
     "deepseek": {
-        "base_url": "https://api.deepseek.com/v1",
-        "default_model": "deepseek-chat",
-        "models": {"deepseek-chat", "deepseek-reasoner"},
+        "base_url": "https://api.deepseek.com/chat/completions",
+        "default_model": "deepseek-v4-flash",
+        "models": {"deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"},
         "display_name": "DeepSeek",
     },
     "openai": {
-        "base_url": "https://api.openai.com/v1",
+        "base_url": "https://api.openai.com/v1/chat/completions",
         "default_model": "gpt-4o-mini",
         "models": {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"},
         "display_name": "OpenAI",
     },
     "openrouter": {
-        "base_url": "https://openrouter.ai/api/v1",
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
         "default_model": "openrouter/auto",
         "models": None,  # None = 接受任意模型名
         "display_name": "OpenRouter",
     },
     "siliconflow": {
-        "base_url": "https://api.siliconflow.cn/v1",
+        "base_url": "https://api.siliconflow.cn/v1/chat/completions",
         "default_model": "Pro/deepseek-chan",
         "models": None,
         "display_name": "SiliconFlow",
