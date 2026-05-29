@@ -3,3 +3,4 @@ flask-cors
 httpx
 tenacity
 python-dotenv
+asyncpg

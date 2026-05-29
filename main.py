@@ -1,3 +1,4 @@
+import asyncpg
 import glob
 import json
 import logging
@@ -5,7 +6,6 @@ import os
 import re
 import time
 from logging.handlers import RotatingFileHandler
-from threading import Lock
 from typing import Optional
 
 import httpx
@@ -26,10 +26,13 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
 ALLOWED_MODELS = {"deepseek-chat", "deepseek-reasoner"}
 
-# 本地缓存，避免重复调用同一条题目
-CACHE_LOCK = Lock()
-answer_cache = {}
-CACHE_TTL_SECONDS = 24 * 3600
+# PostgreSQL 缓存配置
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/ai_tiku_cache",
+)
+DB_CACHE_TTL_SECONDS = int(os.getenv("DB_CACHE_TTL_SECONDS", str(24 * 3600)))
+db_pool: Optional[asyncpg.Pool] = None
 
 # 日志配置
 LOG_FILE = "requests.log"
@@ -117,17 +120,83 @@ def get_system_prompt(question: str, options: str) -> str:
     return SYSTEM_PROMPT
 
 
-def is_cache_valid(entry: tuple) -> bool:
-    answer, timestamp = entry
-    return time.time() - timestamp < CACHE_TTL_SECONDS
-
-
 def make_cache_key(question: str, options: str, model: str) -> str:
     return json.dumps(
         {"question": question, "options": options, "model": model},
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+async def init_db_pool() -> asyncpg.Pool:
+    global db_pool
+    if db_pool is not None:
+        return db_pool
+
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        timeout=10.0,
+    )
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key TEXT PRIMARY KEY,
+                question TEXT NOT NULL,
+                options TEXT,
+                model TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+    return db_pool
+
+
+async def get_cached_answer(cache_key: str) -> Optional[str]:
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT answer, updated_at FROM api_cache WHERE cache_key = $1",
+            cache_key,
+        )
+
+    if not row:
+        return None
+
+    if time.time() - row["updated_at"].timestamp() > DB_CACHE_TTL_SECONDS:
+        return None
+
+    return row["answer"]
+
+
+async def upsert_cached_answer(
+    cache_key: str,
+    question: str,
+    options: str,
+    model: str,
+    answer: str,
+) -> None:
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO api_cache (cache_key, question, options, model, answer, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (cache_key) DO UPDATE
+            SET answer = EXCLUDED.answer,
+                updated_at = EXCLUDED.updated_at
+            """,
+            cache_key,
+            question,
+            options,
+            model,
+            answer,
+        )
 
 
 def should_retry(exception: Exception) -> bool:
@@ -157,14 +226,6 @@ async def fetch_deepseek(question: str, options: str, model: str) -> dict:
     response = await async_client.post("", json=payload)
     response.raise_for_status()
     return response.json()
-
-
-def make_cache_key(question: str, options: str, model: str) -> str:
-    return json.dumps(
-        {"question": question, "options": options, "model": model},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
 
 
 def normalize_answer(answer_text: str, has_options: bool) -> Optional[str]:
@@ -236,9 +297,19 @@ async def answer():
             model = DEFAULT_MODEL
 
         cache_key = make_cache_key(question, options, model)
-        with CACHE_LOCK:
-            entry = answer_cache.get(cache_key)
-            cached_answer = entry[0] if entry and is_cache_valid(entry) else None
+        try:
+            cached_answer = await get_cached_answer(cache_key)
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            logger.exception(
+                "db_lookup_error model=%s question=%r options=%r error=%s elapsed=%.3fs",
+                model,
+                question,
+                options,
+                str(e),
+                elapsed,
+            )
+            return jsonify({"error": "Database lookup failed"}), 500
 
         if cached_answer:
             elapsed = time.perf_counter() - start_time
@@ -315,8 +386,18 @@ async def answer():
             )
             return jsonify([]), 200
 
-        with CACHE_LOCK:
-            answer_cache[cache_key] = (answer_text, time.time())
+        try:
+            await upsert_cached_answer(cache_key, question, options, model, answer_text)
+        except Exception as e:
+            logger.exception(
+                "db_write_error model=%s question=%r options=%r error=%s elapsed=%.3fs",
+                model,
+                question,
+                options,
+                str(e),
+                elapsed,
+            )
+            return jsonify({"error": "Database write failed"}), 500
 
         logger.info(
             "answered model=%s question=%r options=%r answer=%r elapsed=%.3fs",
