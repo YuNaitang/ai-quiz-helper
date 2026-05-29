@@ -191,6 +191,14 @@ def make_cache_key(question: str, options: str, model: str) -> str:
     )
 
 
+@retry(
+    retry=retry_if_exception(
+        lambda e: isinstance(e, (OSError, asyncpg.PostgresError, ConnectionError))
+    ),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=16),
+    reraise=True,
+)
 async def init_db_pool() -> asyncpg.Pool:
     global db_pool
     if db_pool is not None:
