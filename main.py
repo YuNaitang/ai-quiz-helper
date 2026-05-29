@@ -20,13 +20,78 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # 允许跨域，让 OCS 脚本能访问
 
-# DeepSeek 配置
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEFAULT_MODEL = "deepseek-chat"
-ALLOWED_MODELS = {"deepseek-chat", "deepseek-reasoner"}
+# ── API 服务商预设 ──────────────────────────────────────────
+PROVIDER_PRESETS = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-chat",
+        "models": {"deepseek-chat", "deepseek-reasoner"},
+        "display_name": "DeepSeek",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini",
+        "models": {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"},
+        "display_name": "OpenAI",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "openrouter/auto",
+        "models": None,  # None = 接受任意模型名
+        "display_name": "OpenRouter",
+    },
+    "siliconflow": {
+        "base_url": "https://api.siliconflow.cn/v1",
+        "default_model": "Pro/deepseek-chan",
+        "models": None,
+        "display_name": "SiliconFlow",
+    },
+    "custom": {
+        "base_url": None,  # 必须通过 API_BASE_URL 设置
+        "default_model": "custom-model",
+        "models": None,
+        "display_name": "Custom",
+    },
+}
 
-# PostgreSQL 缓存配置
+# ── 服务商选择与配置 ──────────────────────────────────────
+API_PROVIDER = os.getenv("API_PROVIDER", "deepseek").lower()
+
+preset = PROVIDER_PRESETS.get(API_PROVIDER)
+if not preset:
+    raise RuntimeError(
+        f"Unknown API_PROVIDER '{API_PROVIDER}'. "
+        f"Available: {list(PROVIDER_PRESETS.keys())}"
+    )
+
+API_KEY = os.getenv("API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "API_KEY is not set. Set it via API_KEY (or DEEPSEEK_API_KEY for backwards compatibility) "
+        "in .env or the environment."
+    )
+
+PROVIDER_BASE_URL = os.getenv("API_BASE_URL") or preset["base_url"]
+if not PROVIDER_BASE_URL:
+    raise RuntimeError(
+        f"API_BASE_URL is required for provider '{API_PROVIDER}'. "
+        "Set it in .env or the environment."
+    )
+
+PROVIDER_DEFAULT_MODEL = os.getenv("API_MODEL") or preset["default_model"]
+PROVIDER_ALLOWED_MODELS: Optional[set] = preset["models"]  # None = 不校验
+PROVIDER_DISPLAY_NAME = preset["display_name"]
+
+# 额外请求头（JSON 格式，可选）
+extra_headers_str = os.getenv("API_EXTRA_HEADERS", "{}")
+try:
+    API_EXTRA_HEADERS: dict = json.loads(extra_headers_str)
+except json.JSONDecodeError:
+    raise RuntimeError(
+        f"API_EXTRA_HEADERS is not valid JSON: {extra_headers_str}"
+    )
+
+# ── PostgreSQL 缓存配置 ──────────────────────────────────
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/ai_tiku_cache",
@@ -34,22 +99,20 @@ DATABASE_URL = os.getenv(
 DB_CACHE_TTL_SECONDS = int(os.getenv("DB_CACHE_TTL_SECONDS", str(24 * 3600)))
 db_pool: Optional[asyncpg.Pool] = None
 
-# 日志配置
+# ── 日志配置 ──────────────────────────────────────────────
 LOG_FILE = "requests.log"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 MAX_LOG_BACKUPS = 30
 LOG_RETENTION_DAYS = 30
 
-if not DEEPSEEK_API_KEY:
-    raise RuntimeError(
-        "DEEPSEEK_API_KEY is not set. Set it in .env or the environment before starting the app."
-    )
-
+# ── HTTP 客户端（按服务商配置构建）────────────────────────
+auth_scheme = os.getenv("API_AUTH_SCHEME", "Bearer")
 async_client = httpx.AsyncClient(
-    base_url=DEEPSEEK_API_URL,
+    base_url=PROVIDER_BASE_URL,
     headers={
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"{auth_scheme} {API_KEY}",
         "Content-Type": "application/json",
+        **API_EXTRA_HEADERS,
     },
     timeout=httpx.Timeout(10.0, connect=5.0),
     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -271,6 +334,9 @@ async def answer():
     接收 OCS 发来的请求，调用 DeepSeek 获取答案。
     请求体支持字段：question, options, model
     """
+    question = ""
+    options = ""
+    model = PROVIDER_DEFAULT_MODEL
     start_time = time.perf_counter()
     cleanup_old_logs()
 
@@ -282,19 +348,20 @@ async def answer():
 
         question = str(data.get("question") or "").strip()
         options = str(data.get("options") or "").strip()
-        model = str(data.get("model") or DEFAULT_MODEL).strip()
+        model = str(data.get("model") or PROVIDER_DEFAULT_MODEL).strip()
 
         if not question:
             logger.warning("Missing question field")
             return jsonify({"error": "Missing question"}), 400
 
-        if model not in ALLOWED_MODELS:
+        if PROVIDER_ALLOWED_MODELS is not None and model not in PROVIDER_ALLOWED_MODELS:
             logger.warning(
-                "Unsupported model %s, defaulting to %s",
+                "Unsupported model %s for provider %s, defaulting to %s",
                 model,
-                DEFAULT_MODEL,
+                API_PROVIDER,
+                PROVIDER_DEFAULT_MODEL,
             )
-            model = DEFAULT_MODEL
+            model = PROVIDER_DEFAULT_MODEL
 
         cache_key = make_cache_key(question, options, model)
         try:
@@ -335,7 +402,7 @@ async def answer():
                 e.response.status_code,
                 elapsed,
             )
-            return jsonify({"error": f"DeepSeek API status error: {e.response.status_code}"}), 502
+            return jsonify({"error": f"{PROVIDER_DISPLAY_NAME} API status error: {e.response.status_code}"}), 502
         except httpx.RequestError as e:
             elapsed = time.perf_counter() - start_time
             logger.error(
@@ -346,7 +413,7 @@ async def answer():
                 str(e),
                 elapsed,
             )
-            return jsonify({"error": f"DeepSeek API request error: {str(e)}"}), 502
+            return jsonify({"error": f"{PROVIDER_DISPLAY_NAME} API request error: {str(e)}"}), 502
         except Exception as e:
             elapsed = time.perf_counter() - start_time
             logger.exception(

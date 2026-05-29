@@ -4,5 +4,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.env.*
 .DS_Store
+
+# 运行时配置文件（从 .example 复制并修改）
+docker-compose.yml
+.env.*
+!.env.example

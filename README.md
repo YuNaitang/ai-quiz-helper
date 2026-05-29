@@ -4,25 +4,29 @@
 
 ## 目录结构
 - `main.py` - Flask 应用入口。
-- `.env` - 运行时环境变量（不应提交到版本库）。
-- `.env.example` - 环境变量模板。
+- `.env.example` - 环境变量模板（复制为 `.env` 使用）。
+- `docker-compose.example.yml` - Docker Compose 模板（复制为 `docker-compose.yml` 使用）。
 - `requirements.txt` - Python 依赖。
 
 ## 准备工作
-1. 复制 `.env.example` 为 `.env`：
+1. 复制环境变量模板：
    ```bash
    copy .env.example .env
    ```
-2. 在 `.env` 中设置你的 DeepSeek API Key：
+2. 在 `.env` 中设置你的 API Key：
    ```ini
-   DEEPSEEK_API_KEY=你的真实Key
+   API_KEY=你的真实Key
    ```
-3. 安装依赖：
+3. （可选）复制 Docker Compose 模板：
+   ```bash
+   copy docker-compose.example.yml docker-compose.yml
+   ```
+4. 安装依赖：
    ```bash
    pip install -r requirements.txt
    ```
 
-> 新增依赖 `httpx`、`tenacity` 和 `asyncpg`，用于异步调用 DeepSeek API、重试逻辑和 PostgreSQL 缓存。
+> 依赖 `httpx`、`tenacity` 和 `asyncpg`，用于异步调用 AI API、重试逻辑和 PostgreSQL 缓存。
 
 ## 运行服务
 ```bash
@@ -46,14 +50,15 @@ python main.py
   ```
 
 ## 说明
-- 支持 `model` 字段，可选 `deepseek-chat` 或 `deepseek-reasoner`。
-- 相同题目 + 选项 + 模型会在 PostgreSQL 中缓存，避免重复调用 DeepSeek API。
+- 支持 `model` 字段，可以指定当前服务商下的任何模型名。
+- 通过 `API_PROVIDER` 环境变量切换服务商（deepseek / openai / openrouter / siliconflow / custom）。
+- 相同题目 + 选项 + 模型会在 PostgreSQL 中缓存，避免重复调用 API。
 - 日志写入 `requests.log`，并按大小/天数自动轮转。
 
 ## OCS 配置示例
 ```json
 {
-    "name": "DeepSeek AI 后端",
+    "name": "AI 答题后端",
     "url": "https://你的公网地址/answer",
     "method": "post",
     "contentType": "json",
@@ -65,15 +70,18 @@ python main.py
 }
 ```
 
-## Docker Compose
+## Docker Compose（需要先复制模板）
 ```bash
+copy docker-compose.example.yml docker-compose.yml
+# 然后启动
 docker compose up --build
 ```
 
-默认服务会从 `.env` 读取 `DEEPSEEK_API_KEY` 和 `DATABASE_URL`。
+默认服务会从 `.env` 读取 `API_KEY` 和 `DATABASE_URL`。
 
 ## 注意
-- `.env` 中不要提交真实 API Key。
-- 如果运行时无法访问 DeepSeek API，请检查 `DEEPSEEK_API_KEY` 是否正确，并确保服务器能访问外网。
+- `.env` 和 `docker-compose.yml` 已加入 `.gitignore`，不会提交到版本库。
+- 每次拉取代码后，如果模板有更新，需要手动合并到你的本地配置文件。
+- 如果运行时无法访问 API，请检查 `API_KEY` 是否正确，并确保服务器能访问外网。
 - 如果使用 Docker Compose，确保 `DATABASE_URL` 中的主机名与 `docker-compose.yml` 中的 Postgres 服务名称一致（默认是 `db`）。
 
