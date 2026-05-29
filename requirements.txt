@@ -1,4 +1,4 @@
-flask
+Flask[async]
 flask-cors
 httpx
 tenacity
