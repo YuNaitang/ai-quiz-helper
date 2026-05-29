@@ -56,18 +56,43 @@ python main.py
 - 日志写入 `requests.log`，并按大小/天数自动轮转。
 
 ## OCS 配置示例
+> 注意：服务运行在 HTTP 而非 HTTPS，url 中请使用 `http://`
+
 ```json
 {
     "name": "AI 答题后端",
-    "url": "https://你的公网地址/answer",
+    "url": "http://你的公网地址/answer",
     "method": "post",
     "contentType": "json",
     "data": {
         "question": "${title}",
         "options": "${options}"
     },
-    "handler": "return (res) => { if (res && res.length > 0) { return [[res[0][0], res[0][1]]]; } return undefined; }"
+    "handler": "return (res) => res && res.length > 0 ? [res[0][0], res[0][1]] : undefined"
 }
+```
+
+> ⚠️ **"题库无法连接" 排查清单**：
+> 1. **协议** — 必须用 `http://` 而非 `https://`
+> 2. **`@connect` 权限** — 油猴默认拦截未知域名，需要添加 `// @connect 你的服务器IP` 到脚本头部元信息，或在脚本管理器设置中将 `@connect` 模式改为"宽松模式"。
+> 3. **端口可达** — 确保 `15000` 端口已映射/开放，防火墙放行。
+> 4. **`type`** — 加入 `"type": "GM_xmlhttpRequest"` 以使用油猴跨域请求。
+
+```json
+[
+    {
+        "name": "AI 答题后端",
+        "url": "http://你的服务器IP:15000/answer",
+        "method": "post",
+        "contentType": "json",
+        "type": "GM_xmlhttpRequest",
+        "data": {
+            "question": "${title}",
+            "options": "${options}"
+        },
+        "handler": "return (res) => res && res.length > 0 ? [res[0][0], res[0][1]] : undefined"
+    }
+]
 ```
 
 ## Docker Compose（需要先复制模板）

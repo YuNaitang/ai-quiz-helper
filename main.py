@@ -1,4 +1,3 @@
-import asyncpg
 import glob
 import json
 import logging
@@ -6,7 +5,7 @@ import os
 import re
 import time
 from logging.handlers import RotatingFileHandler
-from typing import Optional
+from typing import Optional, Any
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -94,7 +93,7 @@ except json.JSONDecodeError:
 # ── PostgreSQL 缓存配置（可选，不设置则跳过缓存）───────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 DB_CACHE_TTL_SECONDS = int(os.getenv("DB_CACHE_TTL_SECONDS", str(24 * 3600)))
-db_pool: Optional[asyncpg.Pool] = None
+db_pool: Optional[Any] = None
 DB_ENABLED = bool(DATABASE_URL)
 
 # ── 日志配置 ──────────────────────────────────────────────
@@ -189,8 +188,14 @@ def make_cache_key(question: str, options: str, model: str) -> str:
     )
 
 
-async def init_db_pool() -> Optional[asyncpg.Pool]:
+async def init_db_pool() -> Optional[Any]:
     if not DB_ENABLED:
+        return None
+
+    try:
+        import asyncpg
+    except ImportError:
+        logger.warning("asyncpg not installed — caching disabled")
         return None
 
     global db_pool
